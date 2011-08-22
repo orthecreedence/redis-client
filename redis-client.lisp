@@ -1,56 +1,27 @@
 (defpackage #:redis-client
-  (:use #:cl #:cl-user #:bordeaux-threads)
+  (:use #:cl #:cl-user)
   (:nicknames :rc :redis)
-  (:export connect disconnect cmd))
+  (:export connect disconnect cmd defcmd *default-host* *default-port* *command-prefix* *connection-timeout*))
 (in-package #:redis-client)
+
+(defun curtime ()
+  "Get the current system time."
+  (/ (get-internal-real-time) internal-time-units-per-second))
 
 (defclass redis-connection ()
   ((sock :accessor redis-connection-sock :initarg :sock)
-   (lock :accessor redis-connection-lock :initform (bt:make-lock))
+   (lock :accessor redis-connection-lock :initform nil)
+   (last-used :accessor redis-connection-last-used :initform (curtime))
    (host :accessor redis-connection-host :initarg :host)
    (port :accessor redis-connection-port :initarg :port)))
 
 ;; holds pooled connections
 (defvar *connections* nil)
 
+;; set up some connection vars
 (defvar *default-host* "127.0.0.1")
 (defvar *default-port* 6379)
-
-(defun connect (&key (host *default-host*) (port *default-port*))
-  "Returns a connection to redis. Defaults to localhost:6379."
-  (usocket:socket-connect host port))
-
-(defun get-connection (&key (host *default-host*) (port *default-port*))
-  "Provides connection pooling. Grabs an inactive connection, and if none exist,
-  creates a new one, locks it, and adds it to the list."
-  ;; loop over connections, look for onw that matches our criteria and is free
-  (dolist (conn *connections*)
-    (when (and (equal (redis-connection-host conn) host)
-               (equal (redis-connection-port conn) port)
-               (bt:acquire-lock (redis-connection-lock conn)))
-      ;; got a connection, return it
-      (return-from get-connection conn)))
-  ;; didn't get a free/matching connection, create one, lock it, add it to the
-  ;; connection list and return it.
-  (let ((conn (make-instance 'redis-connection :sock (connect :host host :port port) :host host :port port)))
-    (bt:acquire-lock (redis-connection-lock conn) t)
-    (push conn *connections*)
-    conn))
-
-(defun release-connection (conn)
-  "Release a connection lock, allowing others to use this connection."
-  (bt:release-lock (redis-connection-lock conn)))
-
-(defmacro with-connection (host port &body body)
-  "Wraps a body with connect/release connection logic."
-  `(let ((conn (get-connection :host ,host :port ,port)))
-     ,@body
-     (release-connection conn)))
-
-(defmacro constream ()
-  "Wrapper around usocket:socket-stream. Must be used within a
-  (with-connection ...) form."
-  `(usocket:socket-stream (redis-connection-sock conn)))
+(defvar *connection-timeout* 300)
 
 (defun replace-newlines (str)
   "Given a format string like \"i have~%sex with~%goats\", replace all ~%
@@ -63,6 +34,75 @@
           (setf (elt str pos) #\return
                 (elt str (1+ pos)) #\newline)))
   str)
+
+(defun connect (&key (host *default-host*) (port *default-port*))
+  "Returns a connection to redis. Defaults to localhost:6379."
+  (usocket:socket-connect host port))
+
+(defmethod lock-connection ((connection redis-connection))
+  "Set a connection's locked bit. If connection is already locked, return nil."
+  (unless (redis-connection-lock connection)
+    (setf (redis-connection-lock connection) t)))
+
+(defmethod unlock-connection ((connection redis-connection))
+  "Unset a connection's locked bit."
+  (setf (redis-connection-lock connection) nil))
+
+(defmacro constream ()
+  "Wrapper around usocket:socket-stream. Must be used within a
+  (with-connection ...) form."
+  `(usocket:socket-stream (redis-connection-sock conn)))
+
+(defmethod is-connection-alive ((conn redis-connection))
+  "Test if a connection is alive."
+  (handler-case
+    (progn 
+      (format (constream) (replace-newlines "PING~%~%"))
+      (force-output (constream))
+      (parse-response (constream)))
+    (error () nil)))
+
+(defun get-connection (&key (host *default-host*) (port *default-port*))
+  "Provides connection pooling. Grabs an inactive connection, and if none exist,
+  creates a new one, locks it, and adds it to the list."
+  ;; loop over connections, look for one that matches our criteria and is free
+  (dolist (conn *connections*)
+    (when (and (equal (redis-connection-host conn) host)
+               (equal (redis-connection-port conn) port)
+               (lock-connection conn))
+      (if (and (> (redis-connection-last-used conn) *connection-timeout*)
+               (not (is-connection-alive conn)))
+          (progn
+            ;; connection is dead. close it, remove it, and keep looping
+            (usocket:socket-close (redis-connection-sock conn))
+            (setf *connections* (remove-if (lambda (c) (equal c conn)) *connections*)))
+          ;; got a good, unused connection. return it
+          (return-from get-connection conn))))
+  ;; didn't get a free/matching connection, create one, lock it, add it to the
+  ;; connection list and return it.
+  (let ((conn (make-instance 'redis-connection :sock (connect :host host :port port) :host host :port port)))
+    (lock-connection conn)
+    (push conn *connections*)
+    conn))
+
+(defun release-connection (conn)
+  "Release a connection lock, allowing others to use this connection."
+  (unlock-connection conn))
+
+(defmacro with-connection (host port &body body)
+  "Wraps a body with connect/release connection logic."
+  `(let ((conn (get-connection :host ,host :port ,port)))
+     (let ((return (progn ,@body)))
+       (release-connection conn)
+       return)))
+
+(defun redis-read-line (stream)
+  "Read a line from a stream, but expecting a redis line instead of a sane line.
+  This means we read a line terminated with \r\n and strip out the trailing \r."
+  (let ((line (read-line stream nil nil)))
+    (if (eql (elt line (1- (length line))) #\return)
+        (subseq line 0 (1- (length line)))
+        line)))
 
 (defun send-command (data &key (host *default-host*) (port *default-port*))
   "Send a raw, pre-formatted command to redis and parse the response. At this
@@ -77,7 +117,8 @@
   "Given the connection stream, read the first line and determine based on the
   first byte of the response from redis what action to take. Redis has uniform
   respons formats, so this works like a charm."
-  (let ((first-line (read-line s nil nil)))
+  ;; read the first line and trim the trailing \r if it exists
+  (let ((first-line (redis-read-line s)))
     (case (elt first-line 0)
       (#\+ (response-single-line s first-line))
       (#\- (response-error s first-line))
@@ -87,9 +128,10 @@
 
 (defun response-single-line (s first-line)
   "The response from redis was a single line response, just return it usually."
-  (case first-line
-    ("+OK" t)
-    (otherwise (subseq first-line 1 (1- (length first-line))))))
+  (cond
+    ((equal first-line "+OK") t)
+    ((equal first-line "+PONG") t)
+    (t (subseq first-line 1))))
 
 (defun response-error (s first-line)
   "Response from redis was an error. Return the error message. Should most
@@ -105,7 +147,7 @@
   (let ((num-bytes (read-from-string (subseq first-line 1))))
     (when (= num-bytes -1)
       (return-from response-bulk nil))
-    (subseq (read-line s) 0 num-bytes)))
+    (subseq (redis-read-line s) 0 num-bytes)))
 
 (defun response-multi-bulk (s first-line)
   "Get a multi-bulk response."
@@ -115,45 +157,62 @@
     (dotimes (i num-pieces)
       ;; because we programmed response-bulk so well, we can call it here to get
       ;; the bulk response we want and just add it to our "pieces."
-      (push (response-bulk s (read-line s)) pieces))
+      (push (response-bulk s (redis-read-line s)) pieces))
     (reverse pieces)))
 
-(defun cmd (cmd &rest args)
+(defun cmd (&key cmd (host *default-host*) (port *default-port*))
   "Send a command to redis. This function allows to send any command to redis in
   any format without pre-defining a bunch of commands (which CAN be done via
-  defcmd). You can use it like (cmd :command-name arg1 arg2):
-    (cmd :ping)
-    (cmd :set \"mykey\" \"myval\")
-    (cmd :lpush \"mylist\" 45)
-  etc etc. Send any command to redis generically."
-  (let ((send (with-output-to-string (s)
-                ;; define an standard output fn that wraps format strings in
-                ;; replace-newlines
-                (flet ((out (stream format &rest args)
-                         (apply #'format (append (list stream (replace-newlines format)) args))))
-                  ;; build the actual request to redis using the universal format
-                  (out s "*~a~%" (1+ (length args)))
-                  (let ((command (out nil "~:@(~a~)" cmd)))
-                    (out s "$~a~%" (length command))
-                    (out s "~a~%" command))
-                  (dolist (arg args)
-                    (let ((arg (if (stringp arg) arg (write-to-string arg))))
-                      (out s "$~a~%" (length arg))
-                      (out s "~a~%" arg)))
-                  (out s "~%")))))
-    ;; send the command off and return the parsed result
-    (send-command send :host host :port port)))
+  defcmd). Syntax:
+    (cmd :cmd '(lpush \"mylist\" \"myval\"))
+  It's best to wrap it with defcmd."
+  (let ((args (cdr cmd))
+        (cmd (car cmd)))
+    ;; ignore empty commands
+    (unless cmd (return-from cmd nil))
+    ;; build the raw string we send to redis (in universal format)
+    (let ((send (with-output-to-string (s)
+                  ;; define an standard output fn that wraps format strings in
+                  ;; replace-newlines
+                  (flet ((out (stream format &rest args)
+                           (apply #'format (append (list stream (replace-newlines format)) args))))
+                    ;; build the actual request to redis using the universal format
+                    (out s "*~a~%" (1+ (length args)))
+                    (let ((command (out nil "~:@(~a~)" cmd)))
+                      (out s "$~a~%" (length command))
+                      (out s "~a~%" command))
+                    (dolist (arg args)
+                      (let ((arg (if (stringp arg) arg (write-to-string arg))))
+                        (out s "$~a~%" (length arg))
+                        (out s "~a~%" arg)))
+                    (out s "~%")))))
+      ;; send the command off and return the parsed result
+      (send-command send :host host :port port))))
 
-(defmacro defcmd (command &rest args)
-  "Simple wrapper around cmd that allows defining of new commands:
-    (defcmd lpush key val)
-  and now you can do:
-    (lpush \"mylist\" 6969)
-  probably won't work with things like set since it's a predefined CL function,
-  which is why I don't use it heavily in this client. Most commands can be, and
-  are recommended to be, run by (cmd)."
-  `(progn
-     (defun ,command ,args
-       (cmd ',command ,@args))
-     (export ',command)))
+(defun make-sym (&rest parts)
+  "Given a bunch of pieces (string or symbol), concatenate then imto one symbol"
+  (intern (string-upcase (with-output-to-string (s) (dolist (p parts) (princ p s))))))
+
+(defvar *command-prefix* "r-")
+(defmacro defcmd (name &rest args)
+  "Defines a wrapper around (cmd ...) that makes the syntax a bit easier to deal
+  with. For instance, instead of 
+    (cmd :cmd '(incr \"id\"))
+  we can do
+    (defcmd incr key)
+  and after defining the command, do
+    (r-incr \"id\")
+  nice."
+  (let* ((fn-name (make-sym *command-prefix* name))
+         (default-args '(&key (host redis-client:*default-host*) (port redis-client:*default-port*)))
+         (fn-args (if args
+                      (append args default-args)
+                      default-args))
+         (cmd-args (if args
+                       `(list ',name ,@args)
+                       `(list ',name))))
+    `(progn
+       (defun ,fn-name ,fn-args
+         (redis-client:cmd :cmd ,cmd-args :host host :port port))
+       (export ',fn-name))))
 

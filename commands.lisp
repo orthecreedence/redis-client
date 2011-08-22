@@ -1,7 +1,6 @@
 (in-package :redis-client)
 
 ;; NOTE - borken because of namespace shit for now.
-#|
 (defcmd ping)
 (defcmd exists key)
 (defcmd del key)
@@ -21,6 +20,9 @@
 (defcmd flushall)
 
 (defcmd set key val)
-(defcmd get)
+(defcmd get key)
 (defcmd getset key val)
-|#
+
+(defcmd lrange key n1 n2)
+
+(format t "LOADING COMMANDS!!!!~%")
