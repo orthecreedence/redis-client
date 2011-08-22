@@ -72,10 +72,9 @@
                (lock-connection conn))
       (if (and (> (redis-connection-last-used conn) *connection-timeout*)
                (not (is-connection-alive conn)))
-          (progn
-            ;; connection is dead. close it, remove it, and keep looping
-            (usocket:socket-close (redis-connection-sock conn))
-            (setf *connections* (remove-if (lambda (c) (equal c conn)) *connections*)))
+          ;; connection is dead. close it, remove it, and keep looping
+          (progn (usocket:socket-close (redis-connection-sock conn))
+                 (setf *connections* (remove-if (lambda (c) (equal c conn)) *connections*)))
           ;; got a good, unused connection. return it
           (return-from get-connection conn))))
   ;; didn't get a free/matching connection, create one, lock it, add it to the
@@ -96,12 +95,22 @@
        (release-connection conn)
        return)))
 
-(defun redis-read-line (stream)
+(defun trim-return (str)
+  "Remove trailing #\return character from string."
+  (if (eql (elt str (1- (length str))) #\return)
+      (subseq str 0 (1- (length str)))
+      str))
+
+(defun redis-read-line (stream &optional (min-length -1))
   "Read a line from a stream, but expecting a redis line instead of a sane line.
   This means we read a line terminated with \r\n and strip out the trailing \r."
-  (let ((line (read-line stream nil nil)))
-    (if (eql (elt line (1- (length line))) #\return)
-        (subseq line 0 (1- (length line)))
+  (let ((line (trim-return (read-line stream nil nil))))
+    ;(format t "~a (~a): ~a~%" line (length line) (babel:string-to-octets line))
+    (if (< (length line) min-length)
+        ;; the line we read is shorter than what we expected. this must mean the
+        ;; data has a newline in it and we need to keep reading. recurse.
+        (concatenate 'string line #(#\newline) (redis-read-line stream (- min-length (1+ (length line)))))
+        ;; sweet, got just what we need, leave.
         line)))
 
 (defun send-command (data &key (host *default-host*) (port *default-port*))
@@ -147,7 +156,7 @@
   (let ((num-bytes (read-from-string (subseq first-line 1))))
     (when (= num-bytes -1)
       (return-from response-bulk nil))
-    (subseq (redis-read-line s) 0 num-bytes)))
+    (subseq (redis-read-line s num-bytes) 0 num-bytes)))
 
 (defun response-multi-bulk (s first-line)
   "Get a multi-bulk response."
@@ -197,20 +206,23 @@
 (defmacro defcmd (name &rest args)
   "Defines a wrapper around (cmd ...) that makes the syntax a bit easier to deal
   with. For instance, instead of 
-    (cmd :cmd '(incr \"id\"))
-  we can do
+    (rc:cmd :cmd '(incr \"id\"))
+  we can define the command like so
     (defcmd incr key)
-  and after defining the command, do
+  and after defining, we can forever just refer to the command by doing:
     (r-incr \"id\")
-  nice."
+  The function r-incr is created in the package you're in when calling defcmd,
+  so you don't need a package specifier unless you switch packages after
+  defining the command."
   (let* ((fn-name (make-sym *command-prefix* name))
          (default-args '(&key (host redis-client:*default-host*) (port redis-client:*default-port*)))
          (fn-args (if args
                       (append args default-args)
                       default-args))
-         (cmd-args (if args
-                       `(list ',name ,@args)
-                       `(list ',name))))
+         (cmd-args (remove-if (lambda (arg) (equal arg '&optional))
+                              (if args
+                                  `(list ',name ,@args)
+                                  `(list ',name)))))
     `(progn
        (defun ,fn-name ,fn-args
          (redis-client:cmd :cmd ,cmd-args :host host :port port))
