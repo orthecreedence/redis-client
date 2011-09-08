@@ -23,6 +23,11 @@
 (defcmd get key)
 (defcmd getset key val)
 
-(defcmd lrange key n1 n2)
+(defcmd sadd key val)
+(defcmd srem key val)
+(defcmd scard key)
+(defcmd smembers key)
+(defcmd smove key1 key2 value)
+(defcmd sismember key value)
 
-(format t "LOADING COMMANDS!!!!~%")
+(defcmd lrange key n1 &optional n2)

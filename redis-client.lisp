@@ -101,17 +101,21 @@
       (subseq str 0 (1- (length str)))
       str))
 
-(defun redis-read-line (stream &optional (min-length -1))
+(defun redis-read-line (stream &optional (min-length -1) (level 0))
   "Read a line from a stream, but expecting a redis line instead of a sane line.
   This means we read a line terminated with \r\n and strip out the trailing \r."
-  (let ((line (trim-return (read-line stream nil nil))))
+  (let ((line (read-line stream nil nil)))
     ;(format t "~a (~a): ~a~%" line (length line) (babel:string-to-octets line))
-    (if (< (length line) min-length)
-        ;; the line we read is shorter than what we expected. this must mean the
-        ;; data has a newline in it and we need to keep reading. recurse.
-        (concatenate 'string line #(#\newline) (redis-read-line stream (- min-length (1+ (length line)))))
-        ;; sweet, got just what we need, leave.
-        line)))
+    (let ((line (if (< (length line) min-length)
+                    ;; the line we read is shorter than what we expected. this must mean the
+                    ;; data has a newline in it and we need to keep reading. recurse.
+                    (concatenate 'string line #(#\newline) (redis-read-line stream (- min-length (1+ (length line))) (1+ level)))
+                    ;; gnar dude, got just what we need, leave.
+                    line)))
+      ;; only trim last \r if we're in the top level.
+      (if (zerop level)
+          (trim-return line)
+          line))))
 
 (defun send-command (data &key (host *default-host*) (port *default-port*))
   "Send a raw, pre-formatted command to redis and parse the response. At this
@@ -175,8 +179,18 @@
   defcmd). Syntax:
     (cmd :cmd '(lpush \"mylist\" \"myval\"))
   It's best to wrap it with defcmd."
-  (let ((args (cdr cmd))
-        (cmd (car cmd)))
+  (let ((cmd (car cmd))
+        (args (progn
+                ;; look in the arg list for lists. these are MOST LIKELY &rest
+                ;; params sent through by defcmd and need to actually be added
+                ;; to the main arg list from within their sub-list (flattened,
+                ;; if you will)
+                (let ((args nil))
+                  (dolist (arg (cdr cmd))
+                    (if (listp arg)
+                        (dolist (arg-r arg) (push arg-r args))
+                        (push arg args)))
+                  (reverse args)))))
     ;; ignore empty commands
     (unless cmd (return-from cmd nil))
     ;; build the raw string we send to redis (in universal format)
@@ -219,7 +233,7 @@
          (fn-args (if args
                       (append args default-args)
                       default-args))
-         (cmd-args (remove-if (lambda (arg) (equal arg '&optional))
+         (cmd-args (remove-if (lambda (arg) (or (equal arg '&rest) (equal arg '&optional)))
                               (if args
                                   `(list ',name ,@args)
                                   `(list ',name)))))
