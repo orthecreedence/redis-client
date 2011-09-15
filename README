@@ -45,9 +45,9 @@ valid response. For instance:
 Specifying host/port:
 
     (rc:r-set "my-friends" 1 :host "10.0.2.87" :port 6377)
-	T
-	(rc:r-decr "my-friends" :host "10.0.2.87" :port 6377)
-	0
+    T
+    (rc:r-decr "my-friends" :host "10.0.2.87" :port 6377)
+    0
 
 You can define commands with a more terse syntax using the defcmd macro, which
 prefixes your commands with rc:*command-prefix* (defaults to "r-") to avoid
@@ -55,7 +55,7 @@ name clashes with CL. defcmd will create the function in whatever package you're
 currently in, not the redis-client package. If you want to add commands to the
 redis-client package, open redis-client/commands.lisp and add them ;).
 
-    (rc:defcmd set key val)		; already defined in commands.lisp
+    (rc:defcmd set key val)        ; already defined in commands.lisp
     (r-set "mykey" "myval")
 
 Changing the command prefix for (defcmd):
