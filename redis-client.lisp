@@ -4,14 +4,14 @@
   (:export connect disconnect cmd defcmd *default-host* *default-port* *command-prefix* *connection-timeout*))
 (in-package #:redis-client)
 
-(defun curtime ()
-  "Get the current system time."
-  (/ (get-internal-real-time) internal-time-units-per-second))
+(defun now ()
+  "Wrapper around get-universal-time."
+  (get-universal-time))
 
 (defclass redis-connection ()
   ((sock :accessor redis-connection-sock :initarg :sock)
    (lock :accessor redis-connection-lock :initform nil)
-   (last-used :accessor redis-connection-last-used :initform (curtime))
+   (last-used :accessor redis-connection-last-used :initform (now))
    (host :accessor redis-connection-host :initarg :host)
    (port :accessor redis-connection-port :initarg :port)))
 
@@ -62,6 +62,10 @@
       (parse-response (constream)))
     (error () nil)))
 
+(defun get-time-diff (&optional (time 0))
+  "Get the difference in seconds between some point in time and now."
+  (- (now) time))
+
 (defun get-connection (&key (host *default-host*) (port *default-port*))
   "Provides connection pooling. Grabs an inactive connection, and if none exist,
   creates a new one, locks it, and adds it to the list."
@@ -70,13 +74,14 @@
     (when (and (equal (redis-connection-host conn) host)
                (equal (redis-connection-port conn) port)
                (lock-connection conn))
-      (if (and (> (redis-connection-last-used conn) *connection-timeout*)
+      (if (and (< *connection-timeout* (get-time-diff (redis-connection-last-used conn)))
                (not (is-connection-alive conn)))
           ;; connection is dead. close it, remove it, and keep looping
           (progn (usocket:socket-close (redis-connection-sock conn))
                  (setf *connections* (remove-if (lambda (c) (equal c conn)) *connections*)))
-          ;; got a good, unused connection. return it
-          (return-from get-connection conn))))
+          ;; got a good, unused connection. return it and set the "last used" time
+          (progn (setf (redis-connection-last-used conn) (now))
+                 (return-from get-connection conn)))))
   ;; didn't get a free/matching connection, create one, lock it, add it to the
   ;; connection list and return it.
   (let ((conn (make-instance 'redis-connection :sock (connect :host host :port port) :host host :port port)))
