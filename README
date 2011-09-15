@@ -1,0 +1,72 @@
+This is a common lisp client for Redis. So far tested in clisp/ClozureCL on
+windows/linux, but will probably work in any good CL implementation. It has
+connection pooling so should be thread-safe by default. I have tested this,
+but only in a limited fashion.
+
+It implements redis' somewhat new universal syntax, so commands can be sent
+and more importantly parsed automatically without telling it what to expect or
+send for each specific command.
+
+Some things to improve are possibly the efficiency of the data transfer
+stuff. Also, error handling is pretty much nil, and needs some attention.
+
+This is a great, simple client that you can get started with really easily.
+Also, feel free to send any improvements my way.
+
+
+Usage
+--------------
+Put redis-client/ into your asdf system folder. Then do
+
+    (asdf:operate #'asdf:load-op :redis-client)
+
+-OR-
+
+    (ql:quickload :redis-client)
+
+Now you can do things like:
+
+    (rc:r-ping)
+    T
+    (rc:r-set "mykey" "myval")
+    T
+    (rc:r-get "mykey")
+    "myval"
+
+...etc. Please note that not all redis commands are implemented, but there is a
+generic command that allows you to send any command to redis and get any
+valid response. For instance:
+
+    (rc:cmd :cmd '(set "mykey" "omglolwtf"))
+    T
+    (rc:cmd :cmd '(get "mykey"))
+    "omglolwtf"
+
+Specifying host/port:
+
+    (rc:r-set "my-friends" 1 :host "10.0.2.87" :port 6377)
+	T
+	(rc:r-decr "my-friends" :host "10.0.2.87" :port 6377)
+	0
+
+You can define commands with a more terse syntax using the defcmd macro, which
+prefixes your commands with rc:*command-prefix* (defaults to "r-") to avoid
+name clashes with CL. defcmd will create the function in whatever package you're
+currently in, not the redis-client package. If you want to add commands to the
+redis-client package, open redis-client/commands.lisp and add them ;).
+
+    (rc:defcmd set key val)		; already defined in commands.lisp
+    (r-set "mykey" "myval")
+
+Changing the command prefix for (defcmd):
+
+    (setf rc:*command-prefix* "lol-")
+    (defcmd set key val)
+    (lol-set "mygoat" "hurts")
+
+
+I probably forgot to mention a few things, but let me know if something doesn't
+make sense and I'll document it. Keep in mind this is in alpha at the moment, so
+expect more fixes as I use this client in more projects.
+
+Enjoy!
