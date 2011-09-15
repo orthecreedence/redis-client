@@ -1,6 +1,5 @@
 (in-package :redis-client)
 
-;; NOTE - borken because of namespace shit for now.
 (defcmd ping)
 (defcmd exists key)
 (defcmd del key)
