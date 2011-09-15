@@ -64,6 +64,11 @@ Changing the command prefix for (defcmd):
     (defcmd set key val)
     (lol-set "mygoat" "hurts")
 
+You can set the connection timeout for your connections to match the redis
+"timeout" parameter. If a connection goes this many seconds without being used,
+it will be removed from the connection pool.
+
+    (setf rc:*connection-timeout* 300)
 
 I probably forgot to mention a few things, but let me know if something doesn't
 make sense and I'll document it. Keep in mind this is in alpha at the moment, so

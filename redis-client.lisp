@@ -74,8 +74,7 @@
     (when (and (equal (redis-connection-host conn) host)
                (equal (redis-connection-port conn) port)
                (lock-connection conn))
-      (if (and (< *connection-timeout* (get-time-diff (redis-connection-last-used conn)))
-               (not (is-connection-alive conn)))
+      (if (<= (1- *connection-timeout*) (get-time-diff (redis-connection-last-used conn)))
           ;; connection is dead. close it, remove it, and keep looping
           (progn (usocket:socket-close (redis-connection-sock conn))
                  (setf *connections* (remove-if (lambda (c) (equal c conn)) *connections*)))
