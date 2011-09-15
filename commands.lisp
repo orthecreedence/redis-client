@@ -22,6 +22,10 @@
 (defcmd set key val)
 (defcmd get key)
 (defcmd getset key val)
+(defcmd incr key)
+(defcmd incrby key int)
+(defcmd decr key)
+(defcmd decrby key int)
 
 (defcmd sadd key val)
 (defcmd srem key val)
