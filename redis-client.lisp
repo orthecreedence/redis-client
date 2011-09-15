@@ -49,12 +49,14 @@
   (setf (redis-connection-lock connection) nil))
 
 (defmacro constream ()
-  "Wrapper around usocket:socket-stream. Must be used within a
-  (with-connection ...) form."
+  "Wrapper around usocket:socket-stream. Must be used in a block that has the
+  variable conn defined (such as within a (with-connection ...) block."
   `(usocket:socket-stream (redis-connection-sock conn)))
 
 (defmethod is-connection-alive ((conn redis-connection))
-  "Test if a connection is alive."
+  "Test if a connection is alive. Currently unused, but still could be useful so
+  I'm leaving it in for now. Works by sending a PING/PONG across the wire and
+  seeing if the socket fails."
   (handler-case
     (progn 
       (format (constream) (replace-newlines "PING~%~%"))
